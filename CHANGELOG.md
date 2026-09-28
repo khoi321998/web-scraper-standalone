@@ -1,5 +1,14 @@
 # Change Log
 
+## Unreleased
+
+- Added [Actor Standby](https://docs.apify.com/platform/actors/running/standby) mode: the Actor runs as an HTTP API (`GET/POST /scrape`) and keeps `keepAlive` crawlers, browsers and proxy sessions warm between calls, instead of repeating the full warm-up on every run.
+    - Crawlers are shared by jobs with the same browser/proxy settings; all other options are per job.
+    - Per-job `maxPagesPerCrawl`, `maxResultsPerCrawl` and `timeoutSecs` (partial results on timeout). Opt-in `saveToDataset`.
+- Batch runs now handle the `aborting` event and exit gracefully.
+- `proxyConfiguration` (Apify Proxy, `RESIDENTIAL`), `proxyRotation` (`RECOMMENDED`) and `useChrome` (`true`) are now fixed in code and removed from the input schema.
+- Built-in navigation hooks can be written in `src/internals/navigationHooks.ts`. They run before any hooks passed in the input.
+
 ## 3.0.12 (2024-10-25)
 
 - Updated Crawlee version to v3.11.5 and SDK v3.2.6

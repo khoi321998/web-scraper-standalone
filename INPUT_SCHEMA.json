@@ -1,6 +1,6 @@
 {
     "title": "Puppeteer Scraper Input",
-    "description": "Use the following form to configure Puppeteer Scraper. The Start URLs and Page function are required and all other fields are optional. To learn more about the different options, click on their title or on the nearby question marks. For details about the Page function visit the Actor's README in the ACTOR INFO tab.",
+    "description": "Use the following form to configure Puppeteer Scraper. Only the Start URLs are required, all other fields are optional. To learn more about the different options, click on their title or on the nearby question marks. For details about the Page function visit the Actor's README in the ACTOR INFO tab.",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
@@ -9,7 +9,11 @@
             "title": "Start URLs",
             "type": "array",
             "description": "URLs to start with",
-            "prefill": [{ "url": "https://crawlee.dev/js" }],
+            "prefill": [
+                {
+                    "url": "https://crawlee.dev/js"
+                }
+            ],
             "editor": "requestListSources"
         },
         "globs": {
@@ -73,33 +77,11 @@
         "pageFunction": {
             "title": "Page function",
             "type": "string",
-            "description": "Function executed for each request",
-            "prefill": "async function pageFunction(context) {\n    const { page, request, log } = context;\n    const title = await page.title();\n    log.info(`URL: ${request.url} TITLE: ${title}`);\n    return {\n        url: request.url,\n        title\n    };\n}",
+            "description": "Optional. Function executed for each request. Leave empty to use the built-in page function compiled into the Actor.",
             "editor": "javascript"
         },
-        "proxyConfiguration": {
-            "sectionCaption": "Proxy and browser configuration",
-            "title": "Proxy configuration",
-            "type": "object",
-            "description": "Specifies proxy servers that will be used by the scraper in order to hide its origin.<br><br>For details, see <a href='https://apify.com/apify/puppeteer-scraper#proxy-configuration' target='_blank' rel='noopener'>Proxy configuration</a> in README.",
-            "prefill": { "useApifyProxy": true },
-            "default": { "useApifyProxy": true },
-            "editor": "proxy"
-        },
-        "proxyRotation": {
-            "title": "Proxy rotation",
-            "type": "string",
-            "description": "This property indicates the strategy of proxy rotation and can only be used in conjunction with Apify Proxy. The recommended setting automatically picks the best proxies from your available pool and rotates them evenly, discarding proxies that become blocked or unresponsive. If this strategy does not work for you for any reason, you may configure the scraper to either use a new proxy for each request, or to use one proxy as long as possible, until the proxy fails. IMPORTANT: This setting will only use your available Apify Proxy pool, so if you don't have enough proxies for a given task, no rotation setting will produce satisfactory results.",
-            "default": "RECOMMENDED",
-            "editor": "select",
-            "enum": ["RECOMMENDED", "PER_REQUEST", "UNTIL_FAILURE"],
-            "enumTitles": [
-                "Use recommended settings",
-                "Rotate proxy after each request",
-                "Use one proxy until failure"
-            ]
-        },
         "sessionPoolName": {
+            "sectionCaption": "Proxy and browser configuration",
             "title": "Session pool name",
             "type": "string",
             "description": "<b>Use only english alphanumeric characters dashes and underscores.</b> A session is a representation of a user. It has it's own IP and cookies which are then used together to emulate a real user. Usage of the sessions is controlled by the Proxy rotation option. By providing a session pool name, you enable sharing of those sessions across multiple Actor runs. This is very useful when you need specific cookies for accessing the websites or when a lot of your proxies are already blocked. Instead of trying randomly, a list of working sessions will be saved and a new Actor run can reuse those sessions. Note that the IP lock on sessions expires after 24 hours, unless the session is used again in that window.",
@@ -116,19 +98,13 @@
             "editor": "json",
             "isSecret": true
         },
-        "useChrome": {
-            "title": "Use Chrome",
-            "type": "boolean",
-            "description": "The scraper will use a real Chrome browser instead of a Chromium masking as Chrome. Using this option may help with bypassing certain anti-scraping protections, but risks that the scraper will be unstable or not work at all.",
-            "default": false,
-            "groupCaption": "Browser masking",
-            "groupDescription": "Settings that help mask as a real user and prevent scraper detection."
-        },
         "headless": {
             "title": "Run browsers in headless mode",
             "type": "boolean",
             "description": "By default, browsers run in headless mode. You can toggle this off to run them in headful mode, which can help with certain rare anti-scraping protections but is slower and more costly.",
-            "default": true
+            "default": true,
+            "groupCaption": "Browser masking",
+            "groupDescription": "Settings that help mask as a real user and prevent scraper detection."
         },
         "ignoreSslErrors": {
             "title": "Ignore SSL errors",
@@ -221,22 +197,8 @@
             "prefill": ["networkidle2"],
             "editor": "json"
         },
-        "preNavigationHooks": {
-            "sectionCaption": "Advanced configuration",
-            "title": "Pre-navigation hooks",
-            "type": "string",
-            "description": "Async functions that are sequentially evaluated before the navigation. Good for setting additional cookies or browser properties before navigation. The function accepts two parameters, `crawlingContext` and `gotoOptions`, which are passed to the `page.goto()` function the crawler calls to navigate.",
-            "prefill": "// We need to return array of (possibly async) functions here.\n// The functions accept two arguments: the \"crawlingContext\" object\n// and \"gotoOptions\".\n[\n    async (crawlingContext, gotoOptions) => {\n        const { page } = crawlingContext;\n        // ...\n    },\n]",
-            "editor": "javascript"
-        },
-        "postNavigationHooks": {
-            "title": "Post-navigation hooks",
-            "type": "string",
-            "description": "Async functions that are sequentially evaluated after the navigation. Good for checking if the navigation was successful. The function accepts `crawlingContext` as the only parameter.",
-            "prefill": "// We need to return array of (possibly async) functions here.\n// The functions accept a single argument: the \"crawlingContext\" object.\n[\n    async (crawlingContext) => {\n        const { page } = crawlingContext;\n        // ...\n    },\n]",
-            "editor": "javascript"
-        },
         "closeCookieModals": {
+            "sectionCaption": "Advanced configuration",
             "title": "Dismiss cookie modals",
             "type": "boolean",
             "description": "Using the [I don't care about cookies](https://addons.mozilla.org/en-US/firefox/addon/i-dont-care-about-cookies/) browser extension. When on, the crawler will automatically try to dismiss cookie consent modals. This can be useful when crawling European websites that show cookie consent modals.",
@@ -295,5 +257,5 @@
             "resourcePermissions": ["READ", "WRITE"]
         }
     },
-    "required": ["startUrls", "proxyConfiguration"]
+    "required": ["startUrls"]
 }

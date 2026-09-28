@@ -32,6 +32,67 @@ In summary, Puppeteer Scraper works as follows:
 
 Puppeteer Scraper has a number of other configuration settings to improve performance, set cookies for login to websites, mask the web browser, etc... See [Advanced configuration](#advanced-configuration) below for the complete list of settings.
 
+## Standby mode (real-time scraping API)
+
+Each normal run starts a container, launches Chromium, sets up the proxy and session pool, and only then scrapes. For a handful of pages that warm-up is most of the run. In **[Actor Standby](https://docs.apify.com/platform/actors/running/standby)** mode, the Actor keeps running as an HTTP server between requests. Every call reuses browsers, proxy sessions and cookies that are already warm, so you only wait for the pages themselves.
+
+Normal (batch) runs are unaffected. The Actor switches to Standby only when the platform starts it in Standby mode.
+
+### How it works
+
+- On start, the server answers the readiness probe immediately and creates the crawler in the background, so the first call doesn't pay for that setup.
+- Every HTTP call is a **job**. Its input is merged over the Standby run's input (the Actor's default input), and then input schema defaults are filled in.
+- Jobs whose browser, proxy and session settings match share one long-lived `keepAlive` crawler. The settings that must match are the proxy country (auto-selected from the start URLs), `sessionPoolName`, `headless`, `ignoreSslErrors`, `ignoreCorsAndCsp`, `maxConcurrency`, `maxRequestRetries`, `respectRobotsTxtFile` and `pageFunctionTimeoutSecs`. Every other option (page function, hooks, link selectors, limits, `waitUntil`, `customData`, …) is applied per job.
+- Requests are scoped to their job. Two jobs can scrape the same URL, and when a job finishes, the queue drops its leftover requests.
+- The response contains the job's results. They are **not** written to the dataset unless you send `saveToDataset: true`.
+
+### Calling the Standby API
+
+```bash
+# Quick GET: repeat `url` for more start URLs; other query params are input fields (parsed as JSON when possible)
+curl "https://<standby-url>/scrape?url=https://example.com&maxScrollHeightPixels=0" \
+  -H "Authorization: Bearer <APIFY_TOKEN>"
+
+# POST: the body is a (partial) Actor input
+curl -X POST "https://<standby-url>/scrape" \
+  -H "Authorization: Bearer <APIFY_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"startUrls":[{"url":"https://crawlee.dev/js"}],"linkSelector":"a","globs":[{"glob":"https://crawlee.dev/js/docs/**"}],"maxPagesPerCrawl":5}'
+```
+
+Response:
+
+```json
+{
+    "jobId": "9895d882-605a-4807-83b0-e9eaa1166907",
+    "status": "completed",
+    "durationMillis": 4586,
+    "itemCount": 4,
+    "items": [{ "url": "https://crawlee.dev/js", "title": "...", "#error": false, "#debug": {} }]
+}
+```
+
+`status` is `completed`, `maxResultsReached`, `timedOut` (partial results are returned) or `aborted`. Invalid input returns HTTP `400` with `{ "error": "..." }`.
+
+Standby-only input fields:
+
+| Field           | Default           | Description                                                                                                  |
+| --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| `timeoutSecs`   | `240` (max `290`) | How long the call waits before it returns partial results. The platform cuts Standby responses at 5 minutes. |
+| `saveToDataset` | `false`           | Also push the results to the run's dataset, or to `datasetName`.                                             |
+
+### Tips for Standby
+
+- For the fastest responses, send `waitUntil: ["domcontentloaded"]` and `maxScrollHeightPixels: 0` when the page allows it.
+- Keep the crawler-level settings listed above the same across calls. Each new combination starts its own crawler with its own browsers.
+- Standby is meant for small, fast jobs. Use a normal run for large crawls.
+
+### Running Standby locally
+
+```bash
+APIFY_META_ORIGIN=STANDBY ACTOR_WEB_SERVER_PORT=4321 npm run start:dev
+curl "http://localhost:4321/scrape?url=https://example.com"
+```
+
 ## Limitations
 
 The Actor employs a fully-featured Chromium web browser, which is resource-intensive and might be an overkill for websites that do not render the content dynamically using client-side JavaScript. To achieve better performance for scraping such sites, you might prefer to use [**Cheerio Scraper**](https://apify.com/apify/cheerio-scraper), which downloads and processes raw HTML pages without the overheads of a web browser.
@@ -441,44 +502,17 @@ Usage:
 const $ = await context.parseWithCheerio();
 ```
 
-## Proxy Configuration
+## Proxy and browser configuration
 
-The **Proxy configuration** (`proxyConfiguration`) option enables you to set proxies
-that will be used by the scraper in order to prevent its detection by target websites.
-You can use both [Apify Proxy](https://apify.com/proxy)
-and custom HTTP or SOCKS5 proxy servers.
+These settings are fixed in the Actor code (`FIXED_SETTINGS` in `src/internals/consts.ts`), so they are not input fields. If you pass them in the input anyway, they are ignored and a warning is logged.
 
-Proxy is required to run the scraper. The following table lists the available options of the proxy configuration setting:
+| Setting              | Fixed value                             |
+| -------------------- | --------------------------------------- |
+| `proxyConfiguration` | Apify Proxy, `RESIDENTIAL` group        |
+| `proxyRotation`      | `RECOMMENDED`                           |
+| `useChrome`          | `true`: real Chrome instead of Chromium |
 
-| Option                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Apify Proxy (automatic)       | The scraper will load all web pages using [Apify Proxy](https://apify.com/proxy) in the automatic mode. In this mode, the proxy uses all proxy groups that are available to the user, and for each new web page it automatically selects the proxy that hasn't been used in the longest time for the specific hostname, in order to reduce the chance of detection by the website. You can view the list of available proxy groups on the [Proxy](https://console.apify.com/proxy) page in Apify Console. |
-| Apify Proxy (selected groups) | The scraper will load all web pages using [Apify Proxy](https://apify.com/proxy) with specific groups of target proxy servers.                                                                                                                                                                                                                                                                                                                                                                            |
-| Custom proxies                | The scraper will use a custom list of proxy servers. The proxies must be specified in the `scheme://user:password@host:port` format, and multiple proxies should be separated by a space of a new line. The URL scheme can be either `http` or `socks5`. Username and password can be omitted if the proxy doesn't require authorization, but the port must always be present.                                                                                                                            |
-
-Custom proxy example:
-
-```
-http://bob:password@proxy1.example.com:8000
-http://bobby:password123@proxy2.example.com:3001
-```
-
-The proxy configuration can be set programmatically when calling the Actor using the API by setting the `proxyConfiguration` field. It accepts a JSON object with the following structure:
-
-```JavaScript
-{
-    // Indicates whether to use Apify Proxy or not.
-    "useApifyProxy": Boolean,
-
-    // Array of Apify Proxy groups, only used if "useApifyProxy" is true.
-    // If missing or null, Apify Proxy will use the automatic mode.
-    "apifyProxyGroups": String[],
-
-    // Array of custom proxy URLs, in "scheme://user:password@host:port" format.
-    // If missing or null, custom proxies are not used.
-    "proxyUrls": String[],
-}
-```
+When all start URLs share a supported country-code TLD (currently `.ua`), the proxy country is picked automatically.
 
 ## Advanced Configuration
 
@@ -507,6 +541,18 @@ postNavigationHooks: [
 ```
 
 Check out the docs for [Post-navigation hooks](https://crawlee.dev/api/puppeteer-crawler/interface/PuppeteerCrawlerOptions#preNavigationHooks) and the [PuppeteerHook type](https://crawlee.dev/api/puppeteer-crawler/interface/PuppeteerHook) for more info regarding the objects passed into these functions.
+
+### Built-in navigation hooks (`src/internals/navigationHooks.ts`)
+
+Hooks can also be written in TypeScript in `src/internals/navigationHooks.ts` and compiled into the Actor, in the `preNavigationHooks` and `postNavigationHooks` arrays. They are type-checked and always run, in both batch and Standby mode, **before** any hooks passed in the input. Input hooks are added after them and don't replace them. That way the prefilled example hook that Apify Console sends doesn't switch the built-in hooks off.
+
+```TypeScript
+export const preNavigationHooks: PreNavigationHook[] = [
+    async ({ page }, gotoOptions) => {
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    },
+];
+```
 
 ### Debug log
 

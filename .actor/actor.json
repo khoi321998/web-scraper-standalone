@@ -6,6 +6,10 @@
 	"description": "Crawl web pages using Apify, headless Chrome and Puppeteer",
 	"version": "0.1",
 	"buildTag": "latest",
+	"meta": {
+		"generatedBy": "Claude Code with Claude Opus 5.5"
+	},
+	"usesStandbyMode": true,
 	"input": "../INPUT_SCHEMA.json",
 	"storages": {
 		"dataset": {

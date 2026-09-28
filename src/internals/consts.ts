@@ -9,11 +9,26 @@ import type {
 import type { Dictionary } from '@crawlee/utils';
 import type { PuppeteerLifeCycleEvent } from 'puppeteer';
 
+export const SESSION_STORE_NAME = 'APIFY-PUPPETEER-SCRAPER-SESSION-STORE';
+
 export const enum ProxyRotation {
     Recommended = 'RECOMMENDED',
     PerRequest = 'PER_REQUEST',
     UntilFailure = 'UNTIL_FAILURE',
 }
+
+/**
+ * Proxy and browser settings fixed in code (not part of the input schema), for both batch and Standby
+ * runs. Any value passed in the input is overwritten.
+ */
+export const FIXED_SETTINGS = {
+    proxyConfiguration: {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+    },
+    proxyRotation: ProxyRotation.Recommended,
+    useChrome: true,
+} as const;
 
 /**
  * Replicates the INPUT_SCHEMA with TypeScript types for quick reference
@@ -30,8 +45,6 @@ export interface Input {
     keepUrlFragments: boolean;
     respectRobotsTxtFile: boolean;
     pageFunction: string;
-    preNavigationHooks?: string;
-    postNavigationHooks?: string;
     proxyConfiguration: ProxyConfigurationOptions;
     proxyRotation: ProxyRotation;
     sessionPoolName?: string;

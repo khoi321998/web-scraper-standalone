@@ -1,6 +1,3 @@
-import { readFile } from 'node:fs/promises';
-import { URL } from 'node:url';
-
 import type {
     AutoscaledPool,
     EnqueueLinksByClickingElementsOptions,
@@ -22,15 +19,19 @@ import type { CrawlerSetupOptions, RequestMetadata } from '@apify/scraper-tools'
 import { browserTools, constants as scraperToolsConstants, createContext, tools } from '@apify/scraper-tools';
 
 import type { Input } from './consts.js';
-import { ProxyRotation } from './consts.js';
-import { pageFunction as builtinPageFunction } from './pageFunction.js';
-import { countryFromUrls } from './tld_country.js';
+import { ProxyRotation, SESSION_STORE_NAME } from './consts.js';
+import {
+    applyAutoProxyCountry,
+    applyFixedSettings,
+    evalUserFunctions,
+    getBlockedUrlPatterns,
+    SCHEMA,
+    validateInput,
+} from './input_utils.js';
 
-const SESSION_STORE_NAME = 'APIFY-PUPPETEER-SCRAPER-SESSION-STORE';
 const REQUEST_QUEUE_INIT_FLAG_KEY = 'REQUEST_QUEUE_INITIALIZED';
 
 const { META_KEY, DEFAULT_VIEWPORT, DEVTOOLS_TIMEOUT_SECS, SESSION_MAX_USAGE_COUNTS } = scraperToolsConstants;
-const SCHEMA = JSON.parse(await readFile(new URL('../../INPUT_SCHEMA.json', import.meta.url), 'utf8'));
 
 /**
  * Holds all the information necessary for constructing a crawler
@@ -77,91 +78,21 @@ export class CrawlerSetup implements CrawlerSetupOptions {
         this.env = Actor.getEnv();
 
         // Validations
-        this.input.pseudoUrls.forEach((purl) => {
-            if (!tools.isPlainObject(purl)) {
-                throw new Error('The pseudoUrls Array must only contain Objects.');
-            }
-            if (purl.userData && !tools.isPlainObject(purl.userData)) {
-                throw new Error('The userData property of a pseudoUrl must be an Object.');
-            }
-        });
-
-        this.input.initialCookies?.forEach((cookie) => {
-            if (!tools.isPlainObject(cookie)) {
-                throw new Error('The initialCookies Array must only contain Objects.');
-            }
-        });
-
-        this.input.waitUntil.forEach((event) => {
-            if (!/^(domcontentloaded|load|networkidle2|networkidle0)$/.test(event)) {
-                throw new Error('Navigation wait until events must be valid. See tooltip.');
-            }
-        });
-
-        // Tier-1 proxy geo-targeting: if using Apify proxy without an explicit country, derive
-        // one from the start URLs' ccTLD (e.g. *.ua -> UA). Only auto-target countries we know the
-        // proxy pool covers well (allowlist); anything else falls back to random rotation.
-        const AUTO_PROXY_COUNTRIES = new Set(['UA']);
-        const proxy = this.input.proxyConfiguration as { useApifyProxy?: boolean; apifyProxyCountry?: string };
-        if (proxy?.useApifyProxy && !proxy.apifyProxyCountry) {
-            const country = countryFromUrls(this.input.startUrls.map((req) => req.url).filter(Boolean) as string[]);
-            if (country && AUTO_PROXY_COUNTRIES.has(country)) {
-                proxy.apifyProxyCountry = country;
-                log.info(`Auto-selected proxy country "${country}" from start URL ccTLD.`);
-            } else if (country) {
-                log.info(`ccTLD country "${country}" not in auto-target allowlist; using random proxy rotation.`);
-            }
-        }
+        validateInput(this.input);
+        applyFixedSettings(this.input);
+        applyAutoProxyCountry(this.input);
 
         // solving proxy rotation settings
         this.maxSessionUsageCount = SESSION_MAX_USAGE_COUNTS[this.input.proxyRotation];
 
-        // Functions need to be evaluated. Hybrid: if the input provides a pageFunction string,
-        // eval it (lets you override without rebuilding); otherwise use the built-in real TS
-        // pageFunction compiled into this actor.
-        const pageFunctionSource = this.input.pageFunction?.trim();
-        this.evaledPageFunction = pageFunctionSource
-            ? tools.evalFunctionOrThrow(pageFunctionSource)
-            : (builtinPageFunction as (...args: unknown[]) => unknown);
-
-        if (this.input.preNavigationHooks) {
-            this.evaledPreNavigationHooks = tools.evalFunctionArrayOrThrow(
-                this.input.preNavigationHooks,
-                'preNavigationHooks',
-            );
-        } else {
-            this.evaledPreNavigationHooks = [];
-        }
-
-        if (this.input.postNavigationHooks) {
-            this.evaledPostNavigationHooks = tools.evalFunctionArrayOrThrow(
-                this.input.postNavigationHooks,
-                'postNavigationHooks',
-            );
-        } else {
-            this.evaledPostNavigationHooks = [];
-        }
+        // Functions need to be evaluated.
+        const evaled = evalUserFunctions(this.input);
+        this.evaledPageFunction = evaled.pageFunction;
+        this.evaledPreNavigationHooks = evaled.preNavigationHooks;
+        this.evaledPostNavigationHooks = evaled.postNavigationHooks;
 
         // Excluded resources
-        this.blockedUrlPatterns = [];
-        if (!this.input.downloadMedia) {
-            this.blockedUrlPatterns = [
-                '.jpg',
-                '.jpeg',
-                '.png',
-                '.svg',
-                '.gif',
-                '.webp',
-                '.webm',
-                '.ico',
-                '.woff',
-                '.eot',
-            ];
-        }
-
-        if (!this.input.downloadCss) {
-            this.blockedUrlPatterns.push('.css');
-        }
+        this.blockedUrlPatterns = getBlockedUrlPatterns(this.input);
 
         // Start Chromium with Debugger any time the page function includes the keyword.
         this.devtools = (this.input.pageFunction ?? '').includes('debugger;');
