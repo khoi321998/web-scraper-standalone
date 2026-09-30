@@ -52,14 +52,14 @@ docker build -t web-scraper-standalone .
 docker run -d --name wss-server -p 8080:8080 \
   --cpus=2 --memory=4g \
   --security-opt seccomp=unconfined \
-  -e CRAWLEE_MEMORY_MBYTES=4096 \
-  -e API_KEY=<API_KEY> \
+  --env-file .env \
   web-scraper-standalone
 ```
 
+- Put the configuration in a `.env` file next to the Dockerfile (see [Configuration](#configuration)). At minimum it needs `API_KEY` and `CRAWLEE_MEMORY_MBYTES`. `.env` is ignored by both git and Docker, so the secrets are never committed or baked into the image.
 - `--security-opt seccomp=unconfined` is required. Without it, Chrome's sandbox cannot start inside the container.
 - Set `CRAWLEE_MEMORY_MBYTES` to the container's memory limit. Otherwise Crawlee assumes it may use only 1/4 of it and throttles concurrency.
-- Generate the API key with `openssl rand -hex 32`. Keep it out of git. `--env-file` is a convenient place for it.
+- Generate the API key with `openssl rand -hex 32`.
 - After a rebuild, remove the old container and run it again. A running container keeps using the old image.
 
 The server logs its effective configuration at startup. Secrets are shown only as `set` or `not set`.

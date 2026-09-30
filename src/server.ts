@@ -3,8 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import type { PuppeteerCrawlingContext } from '@crawlee/puppeteer';
-import { Configuration, log, PuppeteerCrawler } from '@crawlee/puppeteer';
+import type { ProxyInfo, PuppeteerCrawlingContext } from '@crawlee/puppeteer';
+import { Configuration, log, LoggerText, PuppeteerCrawler } from '@crawlee/puppeteer';
 import { getInjectableScript } from 'idcac-playwright';
 
 import { ACCEPT_LANGUAGE } from './internals/consts.js';
@@ -22,6 +22,9 @@ import { AUTO_PROXY_COUNTRIES, createApifyProxyConfiguration } from './internals
  * TIMEOUT_SECS (60), MAX_SCROLL_HEIGHT_PIXELS (5000, 0 = no scrolling), CLOSE_COOKIE_MODALS (true),
  * USE_APIFY_PROXY (false) + APIFY_PROXY_PASSWORD, APIFY_PROXY_GROUPS (comma-separated).
  */
+
+// Prefix every log line with a timestamp.
+log.setOptions({ logger: new LoggerText({ skipTime: false }) });
 
 function intEnv(name: string, fallback: number, min = 1): number {
     const raw = process.env[name];
@@ -52,6 +55,14 @@ interface Job {
     reject: (error: Error) => void;
     enqueuedAt: number;
     startedAt?: number;
+    /** Proxy used for the last attempt, for logging. */
+    proxy?: string;
+}
+
+/** Proxy username carries group / session / country (e.g. "groups-RESIDENTIAL,session-x,country-UA"), never the password. */
+function describeProxy(proxyInfo?: ProxyInfo): string {
+    if (!proxyInfo) return 'none';
+    return proxyInfo.username || proxyInfo.hostname;
 }
 
 const jobs = new Map<string, Job>();
@@ -90,6 +101,8 @@ const crawler = new PuppeteerCrawler({
     ],
     async requestHandler(ctx: PuppeteerCrawlingContext) {
         activeCount++;
+        const job = jobs.get(ctx.request.userData.jobId as string);
+        if (job) job.proxy = describeProxy(ctx.proxyInfo);
         try {
             if (CLOSE_COOKIE_MODALS) {
                 await sleep(500);
@@ -99,13 +112,15 @@ const crawler = new PuppeteerCrawler({
             // Scroll to load lazy content before extracting.
             if (MAX_SCROLL_HEIGHT_PIXELS > 0) await ctx.infiniteScroll({ maxScrollHeight: MAX_SCROLL_HEIGHT_PIXELS });
             const result = await pageFunction({ page: ctx.page, request: ctx.request, log: ctx.log });
-            jobs.get(ctx.request.userData.jobId as string)?.resolve(result);
+            job?.resolve(result);
         } finally {
             activeCount--;
         }
     },
-    failedRequestHandler({ request }, error) {
-        jobs.get(request.userData.jobId as string)?.reject(error);
+    failedRequestHandler({ request, proxyInfo }, error) {
+        const job = jobs.get(request.userData.jobId as string);
+        if (job) job.proxy = describeProxy(proxyInfo);
+        job?.reject(error);
     },
 });
 
@@ -173,17 +188,28 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         job.reject = reject;
     });
     jobs.set(jobId, job);
+    log.info(`Received ${url} (in progress: ${jobs.size}, active: ${activeCount}/${MAX_CONCURRENCY})`);
 
     try {
         await crawler.addRequests([{ url, uniqueKey: jobId, userData: { jobId } }]);
+        // Wake the pool now. Its periodic check can be blocked while a task runs (betterSetInterval in
+        // @apify/utilities waits for the task), so without this a new request waits for a running one to finish.
+        await crawler.autoscaledPool?.notify();
         const result = await done;
-        sendJson(res, 200, { ...result, timing: timing(job) });
+        const t = timing(job);
+        log.info(`Scraped ${url} in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}`);
+        sendJson(res, 200, { ...result, timing: t });
     } catch (error) {
-        log.warning(`Scrape failed for ${url}: ${(error as Error).message}`);
-        sendJson(res, 502, { url, error: (error as Error).message, timing: timing(job) });
+        const t = timing(job);
+        log.warning(`Scrape failed for ${url} after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}: ${(error as Error).message}`);
+        sendJson(res, 502, { url, error: (error as Error).message, timing: t });
     } finally {
         jobs.delete(jobId);
     }
+}
+
+function secs(ms: number): string {
+    return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function timing(job: Job) {

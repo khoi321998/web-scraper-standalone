@@ -8,8 +8,16 @@ apify_storage
 crawlee_storage
 storage
 
+# secrets - passed at runtime with --env-file, never baked into the image
+*.env
+.env
+
 # installed files
 node_modules
+
+# local build output - the image compiles its own dist/ from src/; a stale local copy would overwrite it
+dist
+tsconfig.tsbuildinfo
 
 # git folder
 .git
