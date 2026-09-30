@@ -1,5 +1,16 @@
 # Change Log
 
+## 4.0.0 (2026-09-30)
+
+Converted from an Apify Actor into a self-hosted scraper HTTP server.
+
+- **Removed** the Apify Actor mode: `src/main.ts`, `crawler_setup.ts`, `INPUT_SCHEMA.json`, `.actor/actor.json` and the `@apify/scraper-tools` dependency. Link crawling, dataset storage and the Apify input form are gone.
+- **Added** `src/server.ts`: `POST /scrape` scrapes one URL per request and returns the result directly; `GET /` is a health check. Keeps one Chrome warm, limits parallel pages (`MAX_CONCURRENCY`) and queues the rest (`MAX_QUEUE`).
+- **Added** API key auth (`x-api-key` header, `API_KEY` env var, required).
+- **Added** per-request Apify Proxy country: `.ua` URLs use a Ukrainian proxy, others a random one (`src/internals/proxy.ts`).
+- **Fixed in code** (no longer configurable): built-in page function, Chrome, headless, `domcontentloaded`, no robots.txt, recommended proxy rotation, `accept-language` header, cookie modal dismissal, no URL fragments.
+- Docker image now starts the server by default (`EXPOSE 8080`).
+
 ## 3.0.12 (2024-10-25)
 
 - Updated Crawlee version to v3.11.5 and SDK v3.2.6

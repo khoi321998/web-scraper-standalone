@@ -60,4 +60,7 @@ COPY --chown=myuser:myuser . ./
 ENV PUPPETEER_EXECUTABLE_PATH=${APIFY_CHROME_EXECUTABLE_PATH} \
     APIFY_DISABLE_OUTDATED_WARNING=1
 
-CMD ["node", "dist/main.js"]
+# Scraper HTTP server. Configure it with env vars at `docker run` (see src/server.ts); API_KEY is required.
+# Chrome's sandbox needs `--security-opt seccomp=unconfined` on the container.
+EXPOSE 8080
+CMD ["node", "dist/server.js"]

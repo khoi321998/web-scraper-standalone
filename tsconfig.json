@@ -7,11 +7,7 @@
         "moduleResolution": "bundler",
         "allowJs": true,
         "skipLibCheck": true,
-        "lib": ["ES2023", "DOM"],
-        // Published @apify/scraper-tools points "exports.types" at ./dist/index.d.ts, but ships it at the package root.
-        "paths": {
-            "@apify/scraper-tools": ["./node_modules/@apify/scraper-tools/index.d.ts"]
-        }
+        "lib": ["ES2023", "DOM"]
     },
     "include": ["src"]
 }

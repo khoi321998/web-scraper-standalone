@@ -5,21 +5,21 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { PuppeteerCrawlingContext } from '@crawlee/puppeteer';
 import { Configuration, log, PuppeteerCrawler } from '@crawlee/puppeteer';
-import { Actor } from 'apify';
 import { getInjectableScript } from 'idcac-playwright';
 
 import { ACCEPT_LANGUAGE } from './internals/consts.js';
 import type { HarvestResult } from './internals/pageFunction.js';
 import { pageFunction } from './internals/pageFunction.js';
+import { AUTO_PROXY_COUNTRIES, createApifyProxyConfiguration } from './internals/proxy.js';
 
 /**
- * Standalone HTTP mode: keeps one browser warm and scrapes URLs on demand.
+ * Scraper HTTP server: keeps one browser warm and scrapes URLs on demand.
  *
  *   POST /scrape  { "url": "https://..." }  -> scrape result + timing (requires header x-api-key)
  *   GET  /                                  -> health / status (no auth, for health checks)
  *
  * Env vars: API_KEY (required), PORT (8080), MAX_CONCURRENCY (4), MAX_QUEUE (100), MAX_REQUEST_RETRIES (3),
- * TIMEOUT_SECS (60), CLOSE_COOKIE_MODALS (true),
+ * TIMEOUT_SECS (60), MAX_SCROLL_HEIGHT_PIXELS (5000, 0 = no scrolling), CLOSE_COOKIE_MODALS (true),
  * USE_APIFY_PROXY (false) + APIFY_PROXY_PASSWORD, APIFY_PROXY_GROUPS (comma-separated).
  */
 
@@ -39,6 +39,7 @@ const MAX_CONCURRENCY = intEnv('MAX_CONCURRENCY', 4);
 const MAX_QUEUE = intEnv('MAX_QUEUE', 100);
 const MAX_REQUEST_RETRIES = intEnv('MAX_REQUEST_RETRIES', 3, 0);
 const TIMEOUT_SECS = intEnv('TIMEOUT_SECS', 60);
+const MAX_SCROLL_HEIGHT_PIXELS = intEnv('MAX_SCROLL_HEIGHT_PIXELS', 5000, 0);
 const CLOSE_COOKIE_MODALS = process.env.CLOSE_COOKIE_MODALS !== 'false';
 const USE_APIFY_PROXY = process.env.USE_APIFY_PROXY === 'true';
 const APIFY_PROXY_GROUPS = process.env.APIFY_PROXY_GROUPS?.split(',').filter(Boolean);
@@ -59,9 +60,7 @@ let activeCount = 0;
 // Requests live only for the lifetime of the process - don't write them to ./storage.
 Configuration.getGlobalConfig().set('persistStorage', false);
 
-const proxyConfiguration = USE_APIFY_PROXY
-    ? await Actor.createProxyConfiguration({ useApifyProxy: true, groups: APIFY_PROXY_GROUPS })
-    : undefined;
+const proxyConfiguration = USE_APIFY_PROXY ? await createApifyProxyConfiguration(APIFY_PROXY_GROUPS) : undefined;
 
 const crawler = new PuppeteerCrawler({
     keepAlive: true,
@@ -97,6 +96,8 @@ const crawler = new PuppeteerCrawler({
                 await ctx.page.evaluate(getInjectableScript());
                 await sleep(2000);
             }
+            // Scroll to load lazy content before extracting.
+            if (MAX_SCROLL_HEIGHT_PIXELS > 0) await ctx.infiniteScroll({ maxScrollHeight: MAX_SCROLL_HEIGHT_PIXELS });
             const result = await pageFunction({ page: ctx.page, request: ctx.request, log: ctx.log });
             jobs.get(ctx.request.userData.jobId as string)?.resolve(result);
         } finally {
@@ -233,9 +234,11 @@ server.listen(PORT, () => {
         MAX_QUEUE,
         MAX_REQUEST_RETRIES,
         TIMEOUT_SECS,
+        MAX_SCROLL_HEIGHT_PIXELS,
         CLOSE_COOKIE_MODALS,
         USE_APIFY_PROXY,
         APIFY_PROXY_GROUPS: APIFY_PROXY_GROUPS ?? [],
+        AUTO_PROXY_COUNTRIES,
         APIFY_PROXY_PASSWORD: process.env.APIFY_PROXY_PASSWORD ? 'set' : 'not set',
         API_KEY: 'set',
         CRAWLEE_MEMORY_MBYTES: process.env.CRAWLEE_MEMORY_MBYTES ?? 'not set (Crawlee uses 1/4 of system RAM)',

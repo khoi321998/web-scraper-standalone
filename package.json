@@ -1,14 +1,13 @@
 {
-    "name": "actor-puppeteer-scraper",
-    "version": "3.1.0",
+    "name": "web-scraper-server",
+    "version": "4.0.0",
     "private": true,
     "type": "module",
-    "description": "Crawl web pages using Apify, headless Chrome and Puppeteer",
+    "description": "HTTP server that scrapes web pages on demand with headless Chrome and Puppeteer",
     "engines": {
         "node": ">=22"
     },
     "dependencies": {
-        "@apify/scraper-tools": "^1.1.4",
         "@crawlee/puppeteer": "^3.16.0",
         "apify": "^3.7.1",
         "idcac-playwright": "^0.2.0",
@@ -28,8 +27,8 @@
     },
     "scripts": {
         "start": "npm run start:dev",
-        "start:prod": "node dist/main.js",
-        "start:dev": "tsx src/main.ts",
+        "start:prod": "node dist/server.js",
+        "start:dev": "tsx src/server.ts",
         "build": "tsc",
         "lint": "eslint",
         "lint:fix": "eslint --fix",
