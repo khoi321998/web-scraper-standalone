@@ -1,0 +1,18 @@
+{
+	"$schema": "https://apify.com/schemas/v1/actor.ide.json",
+	"actorSpecification": 1,
+	"name": "puppeteer-scraper",
+	"title": "Puppeteer Scraper",
+	"description": "Crawl web pages using Apify, headless Chrome and Puppeteer",
+	"version": "0.1",
+	"buildTag": "latest",
+	"input": "../INPUT_SCHEMA.json",
+	"storages": {
+		"dataset": {
+			"actorSpecification": 1,
+			"fields": {},
+			"views": {}
+		}
+	},
+	"dockerfile": "../Dockerfile"
+}
