@@ -4,8 +4,9 @@ import { createServer } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ProxyInfo, PuppeteerCrawlingContext } from '@crawlee/puppeteer';
-import { Configuration, log, LoggerText, PuppeteerCrawler } from '@crawlee/puppeteer';
+import { Configuration, log, LoggerText, NonRetryableError, PuppeteerCrawler } from '@crawlee/puppeteer';
 import { getInjectableScript } from 'idcac-playwright';
+import type { Page } from 'puppeteer';
 
 import { ACCEPT_LANGUAGE } from './internals/consts.js';
 import type { HarvestResult } from './internals/pageFunction.js';
@@ -49,6 +50,14 @@ const APIFY_PROXY_GROUPS = process.env.APIFY_PROXY_GROUPS?.split(',').filter(Boo
 const MAX_BODY_BYTES = 64 * 1024;
 
 const BLOCKED_URL_PATTERNS = ['.jpg', '.jpeg', '.png', '.svg', '.gif', '.webp', '.webm', '.ico', '.woff', '.eot', '.css'];
+/** Crawlee treats these as "blocked": it retires the session (proxy) and retries on its own. */
+const BLOCKED_STATUS_CODES = [401, 403, 429];
+/**
+ * How long after a job finishes its request is deleted from the queue. The job resolves inside the request
+ * handler, before Crawlee marks the request handled, and marking a deleted request re-inserts it - so wait.
+ */
+const REQUEST_CLEANUP_DELAY_MS = 30_000;
+const MEMORY_LOG_INTERVAL_MS = 10 * 60_000;
 
 interface Job {
     resolve: (result: HarvestResult) => void;
@@ -57,12 +66,38 @@ interface Job {
     startedAt?: number;
     /** Proxy used for the last attempt, for logging. */
     proxy?: string;
+    /** HTTP status of the target page in the last attempt; undefined when no response was received. */
+    statusCode?: number;
 }
 
 /** Proxy username carries group / session / country (e.g. "groups-RESIDENTIAL,session-x,country-UA"), never the password. */
 function describeProxy(proxyInfo?: ProxyInfo): string {
     if (!proxyInfo) return 'none';
     return proxyInfo.username || proxyInfo.hostname;
+}
+
+const SCROLL_STEP_PIXELS = 2000;
+
+/**
+ * Scrolls down in small steps with short random pauses so lazy content loads. Uses window.scrollBy instead of
+ * Crawlee's infiniteScroll: that sends mouse wheel input, which waits for the tab to handle it, and with several
+ * tabs open the wait often took 10-60s and hit the request timeout.
+ */
+async function scrollPage(page: Page, maxScrollHeight: number) {
+    let scrolled = 0;
+    let bottomHits = 0;
+    while (scrolled < maxScrollHeight && bottomHits < 2) {
+        const atBottom = await page.evaluate((step) => {
+            window.scrollBy(0, step);
+            return window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1;
+        }, SCROLL_STEP_PIXELS);
+        scrolled += SCROLL_STEP_PIXELS;
+        // Stop once the page stays at the bottom for two steps, i.e. nothing new loaded during the pause.
+        bottomHits = atBottom ? bottomHits + 1 : 0;
+        await sleep(100 + Math.random() * 200);
+    }
+    // Give requests triggered by the last scroll a moment to finish.
+    await sleep(500);
 }
 
 const jobs = new Map<string, Job>();
@@ -76,14 +111,18 @@ const proxyConfiguration = USE_APIFY_PROXY ? await createApifyProxyConfiguration
 const crawler = new PuppeteerCrawler({
     keepAlive: true,
     maxConcurrency: MAX_CONCURRENCY,
-    // Start at full concurrency instead of ramping up, so simultaneous requests run in parallel right away.
-    autoscaledPoolOptions: { desiredConcurrency: MAX_CONCURRENCY },
+    // Run at exactly MAX_CONCURRENCY. Crawlee's autoscaling cut it to 1-2 on Chrome's normal CPU spikes and
+    // over-counts memory (it sums RSS of Chrome processes that share memory), so MAX_CONCURRENCY is the only limit.
+    autoscaledPoolOptions: { desiredConcurrency: MAX_CONCURRENCY, minConcurrency: MAX_CONCURRENCY },
     maxRequestRetries: MAX_REQUEST_RETRIES,
     navigationTimeoutSecs: TIMEOUT_SECS,
     requestHandlerTimeoutSecs: TIMEOUT_SECS,
     // Session pool is on by default with Crawlee's usage limits = "recommended" proxy rotation.
     proxyConfiguration,
     respectRobotsTxtFile: false,
+    // Keep an idle browser warm. The default retires it after 10s without new pages, so the next request
+    // pays a Chrome cold start (~2s). Browsers are still recycled after 100 pages (retireBrowserAfterPageCount).
+    browserPoolOptions: { retireInactiveBrowserAfterSecs: 3600 },
     launchContext: {
         useChrome: true,
         launchOptions: { headless: true, defaultViewport: { width: 1920, height: 1080 } },
@@ -92,11 +131,23 @@ const crawler = new PuppeteerCrawler({
         async ({ request, page, blockRequests }, gotoOptions) => {
             const job = jobs.get(request.userData.jobId as string);
             if (job && job.startedAt === undefined) job.startedAt = Date.now();
+            if (job) job.statusCode = undefined;
             await blockRequests({ urlPatterns: BLOCKED_URL_PATTERNS });
             await page.setExtraHTTPHeaders({ 'accept-language': ACCEPT_LANGUAGE });
             // Crawlee's API for navigation options is to mutate gotoOptions in a pre-navigation hook.
             // eslint-disable-next-line no-param-reassign
             if (gotoOptions) gotoOptions.waitUntil = 'domcontentloaded';
+        },
+    ],
+    postNavigationHooks: [
+        async ({ request, response }) => {
+            const statusCode = response?.status();
+            const job = jobs.get(request.userData.jobId as string);
+            if (job) job.statusCode = statusCode;
+            if (statusCode === undefined || statusCode < 400 || BLOCKED_STATUS_CODES.includes(statusCode)) return;
+            // 5xx is often temporary (overloaded site, flaky proxy exit), so retry. Other 4xx (404, 410...) won't change.
+            const message = `Target page returned HTTP ${statusCode}.`;
+            throw statusCode >= 500 ? new Error(message) : new NonRetryableError(message);
         },
     ],
     async requestHandler(ctx: PuppeteerCrawlingContext) {
@@ -110,7 +161,7 @@ const crawler = new PuppeteerCrawler({
                 await sleep(2000);
             }
             // Scroll to load lazy content before extracting.
-            if (MAX_SCROLL_HEIGHT_PIXELS > 0) await ctx.infiniteScroll({ maxScrollHeight: MAX_SCROLL_HEIGHT_PIXELS });
+            if (MAX_SCROLL_HEIGHT_PIXELS > 0) await scrollPage(ctx.page, MAX_SCROLL_HEIGHT_PIXELS);
             const result = await pageFunction({ page: ctx.page, request: ctx.request, log: ctx.log });
             job?.resolve(result);
         } finally {
@@ -166,18 +217,18 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
     try {
         body = await readJsonBody(req);
     } catch (error) {
-        sendJson(res, 400, { error: `Invalid JSON body: ${(error as Error).message}` });
+        sendJson(res, 400, { status: 'failed', error: `Invalid JSON body: ${(error as Error).message}` });
         return;
     }
 
     const url = parseTargetUrl(body);
     if (!url) {
-        sendJson(res, 400, { error: 'Body must be JSON like {"url": "https://example.com"}.' });
+        sendJson(res, 400, { status: 'failed', error: 'Body must be JSON like {"url": "https://example.com"}.' });
         return;
     }
 
     if (jobs.size >= MAX_QUEUE) {
-        sendJson(res, 503, { error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
+        sendJson(res, 503, { status: 'failed', error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
         return;
     }
 
@@ -188,25 +239,56 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         job.reject = reject;
     });
     jobs.set(jobId, job);
+    let requestId: string | undefined;
     log.info(`Received ${url} (in progress: ${jobs.size}, active: ${activeCount}/${MAX_CONCURRENCY})`);
 
     try {
-        await crawler.addRequests([{ url, uniqueKey: jobId, userData: { jobId } }]);
+        const { addedRequests } = await crawler.addRequests([{ url, uniqueKey: jobId, userData: { jobId } }]);
+        requestId = addedRequests[0]?.requestId;
         // Wake the pool now. Its periodic check can be blocked while a task runs (betterSetInterval in
         // @apify/utilities waits for the task), so without this a new request waits for a running one to finish.
         await crawler.autoscaledPool?.notify();
         const result = await done;
         const t = timing(job);
-        log.info(`Scraped ${url} in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}`);
-        sendJson(res, 200, { ...result, timing: t });
+        const statusCode = job.statusCode ?? null;
+        log.info(
+            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}`,
+        );
+        sendJson(res, 200, { status: 'success', ...result, statusCode, timing: t });
     } catch (error) {
         const t = timing(job);
-        log.warning(`Scrape failed for ${url} after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}: ${(error as Error).message}`);
-        sendJson(res, 502, { url, error: (error as Error).message, timing: t });
+        const statusCode = job.statusCode ?? null;
+        log.warning(
+            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}: ${(error as Error).message}`,
+        );
+        sendJson(res, 502, { status: 'failed', url, error: (error as Error).message, statusCode, timing: t });
     } finally {
         jobs.delete(jobId);
+        if (requestId) scheduleRequestCleanup(requestId);
     }
 }
+
+/**
+ * The in-memory request queue keeps every handled request until the process exits (Crawlee is built for
+ * finite crawls), so a long-running server would grow without bound. Delete each request once it is done.
+ */
+function scheduleRequestCleanup(requestId: string) {
+    setTimeout(() => {
+        crawler.requestQueue?.client.deleteRequest(requestId).catch((error: Error) => {
+            log.warning(`Failed to delete request ${requestId} from the queue: ${error.message}`);
+        });
+    }, REQUEST_CLEANUP_DELAY_MS).unref();
+}
+
+async function logMemory() {
+    const queueInfo = await crawler.requestQueue?.client.get();
+    const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    log.info(`Memory: Node RSS ${rssMb} MB, requests kept in queue: ${queueInfo?.totalRequestCount ?? 0}`);
+}
+
+setInterval(() => {
+    logMemory().catch((error: Error) => log.warning(`Failed to log memory usage: ${error.message}`));
+}, MEMORY_LOG_INTERVAL_MS).unref();
 
 function secs(ms: number): string {
     return `${(ms / 1000).toFixed(1)}s`;
@@ -233,12 +315,12 @@ const server = createServer((req, res) => {
 
     if (req.method === 'POST' && path === '/scrape') {
         if (!isAuthorized(req)) {
-            sendJson(res, 401, { error: 'Missing or invalid x-api-key header.' });
+            sendJson(res, 401, { status: 'failed', error: 'Missing or invalid x-api-key header.' });
             return;
         }
         handleScrape(req, res).catch((error) => {
             log.exception(error as Error, 'Unhandled error while handling /scrape');
-            if (!res.headersSent) sendJson(res, 500, { error: 'Internal server error.' });
+            if (!res.headersSent) sendJson(res, 500, { status: 'failed', error: 'Internal server error.' });
         });
         return;
     }

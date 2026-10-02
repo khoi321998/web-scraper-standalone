@@ -1,5 +1,11 @@
 # Change Log
 
+## Unreleased
+
+- **Fixed** pages hanging 10-60s (often hitting the timeout) under parallel load: scrolling now uses `window.scrollBy` in small steps instead of Crawlee's `infiniteScroll`, whose mouse wheel input stalls in background tabs.
+- **Fixed** the server running far below `MAX_CONCURRENCY`: Crawlee's autoscaling is pinned to `MAX_CONCURRENCY`, since it dropped to 1-2 on normal Chrome CPU spikes and over-counted memory.
+- **Added** a sizing table to the README.
+
 ## 4.0.0 (2026-09-30)
 
 Converted from an Apify Actor into a self-hosted scraper HTTP server.
