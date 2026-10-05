@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ProxyInfo, PuppeteerCrawlingContext } from '@crawlee/puppeteer';
 import { Configuration, log, LoggerText, NonRetryableError, PuppeteerCrawler } from '@crawlee/puppeteer';
 import { getInjectableScript } from 'idcac-playwright';
-import type { Page } from 'puppeteer';
+import type { HTTPResponse, Page } from 'puppeteer';
 
 import { ACCEPT_LANGUAGE } from './internals/consts.js';
 import type { HarvestResult } from './internals/pageFunction.js';
@@ -68,12 +68,37 @@ interface Job {
     proxy?: string;
     /** HTTP status of the target page in the last attempt; undefined when no response was received. */
     statusCode?: number;
+    /** Number of navigation attempts (1 = no retry). */
+    attempts: number;
+    /** Network timing of the last attempt, for logging; undefined when no response was received. */
+    network?: string;
 }
 
 /** Proxy username carries group / session / country (e.g. "groups-RESIDENTIAL,session-x,country-UA"), never the password. */
 function describeProxy(proxyInfo?: ProxyInfo): string {
     if (!proxyInfo) return 'none';
     return proxyInfo.username || proxyInfo.hostname;
+}
+
+/**
+ * Chrome's own timing of the main document (same numbers as DevTools > Timing). Behind a proxy:
+ * - proxy tunnel: connect to the proxy + CONNECT (proxy picks an exit IP and reaches the site), without TLS
+ * - TLS: TLS handshake with the site through the tunnel
+ * - wait for response: request sent -> response headers received (proxy relay + site server time)
+ * Connect / TLS are -1 when Chrome reuses an open connection.
+ */
+function describeNetworkTiming(response: HTTPResponse): string {
+    const t = response.timing();
+    if (!t) return 'not available';
+    const waitMs = t.receiveHeadersEnd - t.sendEnd;
+    if (t.connectStart < 0) return `connection reused, wait for response ${secs(waitMs)}`;
+    const tlsMs = t.sslStart < 0 ? 0 : t.sslEnd - t.sslStart;
+    const tunnelMs = t.connectEnd - t.connectStart - tlsMs;
+    return `proxy tunnel ${secs(tunnelMs)}, TLS ${secs(tlsMs)}, wait for response ${secs(waitMs)}`;
+}
+
+function describeNetwork(job: Job): string {
+    return `network: ${job.network ?? 'no response'}, attempts ${job.attempts}`;
 }
 
 const SCROLL_STEP_PIXELS = 2000;
@@ -131,7 +156,11 @@ const crawler = new PuppeteerCrawler({
         async ({ request, page, blockRequests }, gotoOptions) => {
             const job = jobs.get(request.userData.jobId as string);
             if (job && job.startedAt === undefined) job.startedAt = Date.now();
-            if (job) job.statusCode = undefined;
+            if (job) {
+                job.statusCode = undefined;
+                job.network = undefined;
+                job.attempts++;
+            }
             await blockRequests({ urlPatterns: BLOCKED_URL_PATTERNS });
             await page.setExtraHTTPHeaders({ 'accept-language': ACCEPT_LANGUAGE });
             // Crawlee's API for navigation options is to mutate gotoOptions in a pre-navigation hook.
@@ -143,7 +172,10 @@ const crawler = new PuppeteerCrawler({
         async ({ request, response }) => {
             const statusCode = response?.status();
             const job = jobs.get(request.userData.jobId as string);
-            if (job) job.statusCode = statusCode;
+            if (job) {
+                job.statusCode = statusCode;
+                if (response) job.network = describeNetworkTiming(response);
+            }
             if (statusCode === undefined || statusCode < 400 || BLOCKED_STATUS_CODES.includes(statusCode)) return;
             // 5xx is often temporary (overloaded site, flaky proxy exit), so retry. Other 4xx (404, 410...) won't change.
             const message = `Target page returned HTTP ${statusCode}.`;
@@ -190,6 +222,18 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
     res.end(JSON.stringify(body));
 }
 
+const NO_TIMING = { queueMs: 0, processMs: 0, totalMs: 0 };
+
+/** Every failed /scrape response has the same shape, so the backend can read url / error / statusCode / timing. */
+function sendFailed(
+    res: ServerResponse,
+    httpStatus: number,
+    body: { url?: string | null; error: string; statusCode?: number | null; timing?: typeof NO_TIMING },
+) {
+    const { url = null, error, statusCode = null, timing: t = NO_TIMING } = body;
+    sendJson(res, httpStatus, { status: 'failed', url, error, statusCode, timing: t });
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -217,23 +261,23 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
     try {
         body = await readJsonBody(req);
     } catch (error) {
-        sendJson(res, 400, { status: 'failed', error: `Invalid JSON body: ${(error as Error).message}` });
+        sendFailed(res, 400, { error: `Invalid JSON body: ${(error as Error).message}` });
         return;
     }
 
     const url = parseTargetUrl(body);
     if (!url) {
-        sendJson(res, 400, { status: 'failed', error: 'Body must be JSON like {"url": "https://example.com"}.' });
+        sendFailed(res, 400, { error: 'Body must be JSON like {"url": "https://example.com"}.' });
         return;
     }
 
     if (jobs.size >= MAX_QUEUE) {
-        sendJson(res, 503, { status: 'failed', error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
+        sendFailed(res, 503, { url, error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
         return;
     }
 
     const jobId = randomUUID();
-    const job = { enqueuedAt: Date.now() } as Job;
+    const job = { enqueuedAt: Date.now(), attempts: 0 } as Job;
     const done = new Promise<HarvestResult>((resolve, reject) => {
         job.resolve = resolve;
         job.reject = reject;
@@ -252,16 +296,16 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.info(
-            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}`,
+            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}, ${describeNetwork(job)}`,
         );
         sendJson(res, 200, { status: 'success', ...result, statusCode, timing: t });
     } catch (error) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.warning(
-            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}: ${(error as Error).message}`,
+            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}, ${describeNetwork(job)}: ${(error as Error).message}`,
         );
-        sendJson(res, 502, { status: 'failed', url, error: (error as Error).message, statusCode, timing: t });
+        sendFailed(res, 502, { url, error: (error as Error).message, statusCode, timing: t });
     } finally {
         jobs.delete(jobId);
         if (requestId) scheduleRequestCleanup(requestId);
@@ -315,12 +359,12 @@ const server = createServer((req, res) => {
 
     if (req.method === 'POST' && path === '/scrape') {
         if (!isAuthorized(req)) {
-            sendJson(res, 401, { status: 'failed', error: 'Missing or invalid x-api-key header.' });
+            sendFailed(res, 401, { error: 'Missing or invalid x-api-key header.' });
             return;
         }
         handleScrape(req, res).catch((error) => {
             log.exception(error as Error, 'Unhandled error while handling /scrape');
-            if (!res.headersSent) sendJson(res, 500, { status: 'failed', error: 'Internal server error.' });
+            if (!res.headersSent) sendFailed(res, 500, { error: 'Internal server error.' });
         });
         return;
     }

@@ -32,6 +32,7 @@ Response `200`:
 ```
 
 - `status` is `"success"` on `200` and `"failed"` on every error response, so callers can check one field.
+- Every error response (`400`, `401`, `500`, `502`, `503`) has the same body: `{ "status": "failed", "url", "error", "statusCode", "timing" }`. `url` is `null` when the request had no valid url (`400`, `401`, `500`). `statusCode` is `null` and `timing` is all zeros when no scrape ran.
 - `statusCode` is the HTTP status of the target page (after redirects). A `200` from this server means the page loaded with a status below 400.
 - `content` holds meta tags, JSON-LD, contact-like script rows, hidden inputs, visible text, links, images, mailto/tel links and social iframes. See [src/internals/pageFunction.ts](src/internals/pageFunction.ts).
 - `timing.queueMs` is the time spent waiting for a free slot. `processMs` is the time spent scraping.
