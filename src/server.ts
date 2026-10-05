@@ -72,6 +72,15 @@ interface Job {
     attempts: number;
     /** Network timing of the last attempt, for logging; undefined when no response was received. */
     network?: string;
+    /**
+     * Time marks of the last attempt, for logging: ['start', t0], then one per finished step
+     * (nav, cookies, scroll, extract). A step's duration is the gap to the previous mark.
+     */
+    marks: [string, number][];
+}
+
+function markStep(job: Job | undefined, name: string) {
+    job?.marks.push([name, Date.now()]);
 }
 
 /** Proxy username carries group / session / country (e.g. "groups-RESIDENTIAL,session-x,country-UA"), never the password. */
@@ -97,8 +106,14 @@ function describeNetworkTiming(response: HTTPResponse): string {
     return `proxy tunnel ${secs(tunnelMs)}, TLS ${secs(tlsMs)}, wait for response ${secs(waitMs)}`;
 }
 
-function describeNetwork(job: Job): string {
-    return `network: ${job.network ?? 'no response'}, attempts ${job.attempts}`;
+/** nav = page.goto until DOMContentLoaded (HTML + blocking scripts, all through the proxy). */
+function describeAttempt(job: Job): string {
+    const steps =
+        job.marks
+            .slice(1)
+            .map(([name, at], i) => `${name} ${secs(at - job.marks[i][1])}`)
+            .join(', ') || 'none finished';
+    return `network: ${job.network ?? 'no response'} | steps: ${steps} | attempts ${job.attempts}`;
 }
 
 const SCROLL_STEP_PIXELS = 2000;
@@ -150,6 +165,9 @@ const crawler = new PuppeteerCrawler({
     browserPoolOptions: { retireInactiveBrowserAfterSecs: 3600 },
     launchContext: {
         useChrome: true,
+        // Give each page its own browser context with its own proxy session. Without this, every page in a
+        // browser shares the proxy of the request that launched it, so parallel requests all use one exit IP.
+        useIncognitoPages: true,
         launchOptions: { headless: true, defaultViewport: { width: 1920, height: 1080 } },
     },
     preNavigationHooks: [
@@ -163,6 +181,7 @@ const crawler = new PuppeteerCrawler({
             }
             await blockRequests({ urlPatterns: BLOCKED_URL_PATTERNS });
             await page.setExtraHTTPHeaders({ 'accept-language': ACCEPT_LANGUAGE });
+            if (job) job.marks = [['start', Date.now()]];
             // Crawlee's API for navigation options is to mutate gotoOptions in a pre-navigation hook.
             // eslint-disable-next-line no-param-reassign
             if (gotoOptions) gotoOptions.waitUntil = 'domcontentloaded';
@@ -176,6 +195,7 @@ const crawler = new PuppeteerCrawler({
                 job.statusCode = statusCode;
                 if (response) job.network = describeNetworkTiming(response);
             }
+            markStep(job, 'nav');
             if (statusCode === undefined || statusCode < 400 || BLOCKED_STATUS_CODES.includes(statusCode)) return;
             // 5xx is often temporary (overloaded site, flaky proxy exit), so retry. Other 4xx (404, 410...) won't change.
             const message = `Target page returned HTTP ${statusCode}.`;
@@ -191,10 +211,15 @@ const crawler = new PuppeteerCrawler({
                 await sleep(500);
                 await ctx.page.evaluate(getInjectableScript());
                 await sleep(2000);
+                markStep(job, 'cookies');
             }
             // Scroll to load lazy content before extracting.
-            if (MAX_SCROLL_HEIGHT_PIXELS > 0) await scrollPage(ctx.page, MAX_SCROLL_HEIGHT_PIXELS);
+            if (MAX_SCROLL_HEIGHT_PIXELS > 0) {
+                await scrollPage(ctx.page, MAX_SCROLL_HEIGHT_PIXELS);
+                markStep(job, 'scroll');
+            }
             const result = await pageFunction({ page: ctx.page, request: ctx.request, log: ctx.log });
+            markStep(job, 'extract');
             job?.resolve(result);
         } finally {
             activeCount--;
@@ -277,7 +302,7 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
     }
 
     const jobId = randomUUID();
-    const job = { enqueuedAt: Date.now(), attempts: 0 } as Job;
+    const job = { enqueuedAt: Date.now(), attempts: 0, marks: [] as Job['marks'] } as Job;
     const done = new Promise<HarvestResult>((resolve, reject) => {
         job.resolve = resolve;
         job.reject = reject;
@@ -296,14 +321,14 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.info(
-            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}, ${describeNetwork(job)}`,
+            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}`,
         );
         sendJson(res, 200, { status: 'success', ...result, statusCode, timing: t });
     } catch (error) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.warning(
-            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}, ${describeNetwork(job)}: ${(error as Error).message}`,
+            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}: ${(error as Error).message}`,
         );
         sendFailed(res, 502, { url, error: (error as Error).message, statusCode, timing: t });
     } finally {
