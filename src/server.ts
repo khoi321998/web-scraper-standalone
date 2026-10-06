@@ -95,7 +95,7 @@ interface Job {
     network?: string;
     /**
      * Time marks of the last attempt, for logging: ['start', t0], then one per finished step
-     * (nav, cookies, scroll, extract). A step's duration is the gap to the previous mark.
+     * (page load, cookies, scroll, extract). A step's duration is the gap to the previous mark.
      */
     marks: [string, number][];
 }
@@ -141,7 +141,7 @@ function describeNetworkTiming(response: HTTPResponse): string {
     return `${status}, proxy tunnel ${secs(tunnelMs)}, TLS ${secs(tlsMs)}, wait for response ${secs(waitMs)}`;
 }
 
-/** nav = page.goto until DOMContentLoaded (HTML + blocking scripts, all through the proxy). */
+/** page load = page.goto until DOMContentLoaded (HTML + blocking scripts, all through the proxy). */
 function describeAttempt(job: Job): string {
     const steps =
         job.marks
@@ -236,7 +236,7 @@ const crawler = new PuppeteerCrawler({
             const statusCode = response?.status();
             const job = jobs.get(request.userData.jobId as string);
             if (job) job.statusCode = statusCode;
-            markStep(job, 'nav');
+            markStep(job, 'page load');
             if (statusCode === undefined || statusCode < 400 || BLOCKED_STATUS_CODES.includes(statusCode)) return;
             // 5xx is often temporary (overloaded site, flaky proxy exit), so retry. Other 4xx (404, 410...) won't change.
             const message = `Target page returned HTTP ${statusCode}.`;

@@ -125,6 +125,17 @@ Each request writes these lines, all starting with the url and the `transactionI
 
 Network timing comes from the main document's response: `HTTP 200, proxy tunnel 1.1s, TLS 0.7s, wait for response 0.8s`. `no response` means the proxy did not connect or the site never answered. A timing with `steps: none finished` means the HTML arrived but the page did not reach DOMContentLoaded in `TIMEOUT_SECS`.
 
+`steps` shows how long each step of the attempt took:
+
+| Step | What it covers |
+| --- | --- |
+| `page load` | Opening the URL until DOMContentLoaded: proxy tunnel, TLS, the HTML and its blocking scripts (each script host needs its own tunnel through the proxy). Includes the network timing above. Limited by `TIMEOUT_SECS` |
+| `cookies` | ~1s wait plus dismissing the cookie banner |
+| `scroll` | Scrolling to load lazy content |
+| `extract` | Reading the content from the page |
+
+When the CPU is saturated, `cookies` and `scroll` grow past their usual ~1s.
+
 Find all lines of one request with `docker logs wss-server 2>&1 | grep order-1234`.
 
 ## Configuration
@@ -159,7 +170,7 @@ Measured in Docker without a proxy, on 10 small business sites (2026-10-02):
 - RAM is about 600 MB plus 45 MB per page in progress, so 1 GB per CPU is enough.
 - To scale, run more instances behind a load balancer. The server is stateless.
 - These numbers are without a proxy. A residential proxy adds seconds of network wait per page, and Chrome uses almost no CPU while waiting, so more pages fit per CPU: 10 on 4 CPUs / 4 GB ran fine in local tests (2026-10-06).
-- To check a setting under real load: `docker stats` near 100% per CPU means CPU is the limit, and so do `scroll` / `extract` steps in the `Scraped ...` log growing to several seconds. `nav` mostly reflects proxy speed.
+- To check a setting under real load: `docker stats` near 100% per CPU means CPU is the limit, and so do `scroll` / `extract` steps in the `Scraped ...` log growing to several seconds. `page load` mostly reflects proxy and site speed.
 
 With Apify Proxy enabled, `.ua` URLs automatically use a Ukrainian proxy. All other URLs use a random proxy from the configured groups. Edit the allowlist in [src/internals/proxy.ts](src/internals/proxy.ts).
 
