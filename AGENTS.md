@@ -24,8 +24,7 @@ Self-hosted HTTP server that scrapes one URL per request with headless Chrome (C
 npm run build                     # tsc
 npm run lint
 docker build -t web-scraper-standalone .
-docker run -d --name wss-server -p 8080:8080 --security-opt seccomp=unconfined \
-  -e CRAWLEE_MEMORY_MBYTES=4096 -e API_KEY=<key> web-scraper-standalone
+docker run -d --name wss-server -p 8080:8080 --cpus=4 --memory=4g --security-opt seccomp=unconfined --env-file .env web-scraper-standalone
 ```
 
 Chrome needs `--security-opt seccomp=unconfined` in Docker. After changing code, rebuild the image and recreate the container.

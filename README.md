@@ -61,21 +61,47 @@ Health check. No auth. Returns `{"status":"ok","maxConcurrency":4,"active":1,"in
 
 ## Running with Docker
 
+### Local
+
 ```bash
 docker build -t web-scraper-standalone .
 
-docker run -d --name wss-server -p 8080:8080 \
-  --cpus=2 --memory=4g \
+docker run -d --name wss-server -p 8080:8080 --cpus=4 --memory=4g --security-opt seccomp=unconfined --env-file .env web-scraper-standalone
+```
+
+The commands are on one line so they work in bash and PowerShell alike. To run new code, rebuild and recreate the container (a running container keeps using the old image):
+
+```bash
+docker rm -f wss-server
+docker build -t web-scraper-standalone .
+docker run -d --name wss-server -p 8080:8080 --cpus=4 --memory=4g --security-opt seccomp=unconfined --env-file .env web-scraper-standalone
+```
+
+### Production
+
+```bash
+docker run -d --name wss-server \
+  --restart unless-stopped --init \
+  -p <private-ip>:8080:8080 \
+  --cpus=4 --memory=4g --shm-size=1g \
   --security-opt seccomp=unconfined \
+  --log-opt max-size=20m --log-opt max-file=5 \
   --env-file .env \
   web-scraper-standalone
 ```
+
+- `--restart unless-stopped` restarts the container after a crash or a server reboot.
+- `--init` reaps exited Chrome processes so they don't pile up as zombies.
+- Bind the port to a private IP (or `127.0.0.1` behind Nginx / Caddy on the same host). Docker's port publishing bypasses `ufw`, so `-p 8080:8080` is reachable from the internet even when the firewall blocks it.
+- `--log-opt` caps log files. Every request writes a few log lines.
+- `--shm-size=1g` gives Chrome more shared memory than Docker's 64 MB default for many open tabs.
+
+### Notes
 
 - Put the configuration in a `.env` file next to the Dockerfile (see [Configuration](#configuration)). At minimum it needs `API_KEY` and `CRAWLEE_MEMORY_MBYTES`. `.env` is ignored by both git and Docker, so the secrets are never committed or baked into the image.
 - `--security-opt seccomp=unconfined` is required. Without it, Chrome's sandbox cannot start inside the container.
 - Set `CRAWLEE_MEMORY_MBYTES` to the container's memory limit. The server always runs at `MAX_CONCURRENCY` (Crawlee's autoscaling is pinned), so this only affects Crawlee's memory warnings, which over-count Chrome's shared memory.
 - Generate the API key with `openssl rand -hex 32`.
-- After a rebuild, remove the old container and run it again. A running container keeps using the old image.
 
 The server logs its effective configuration at startup. Secrets are shown only as `set` or `not set`.
 
