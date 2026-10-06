@@ -85,10 +85,10 @@ The server logs its effective configuration at startup. Secrets are shown only a
 | --- | --- | --- |
 | `API_KEY` | required | Shared secret the caller sends in `x-api-key` (at least 16 characters) |
 | `PORT` | `8080` | HTTP port |
-| `MAX_CONCURRENCY` | `4` | Pages scraped in parallel. CPU is the limit: use about 1.5 per CPU (4 on 2 CPUs, 6 on 4 CPUs). See [Sizing](#sizing) |
+| `MAX_CONCURRENCY` | `4` | Pages scraped in parallel. Without a proxy, use about 1.5 per CPU. With a residential proxy, pages mostly wait on the network, so more fits (10 on 4 CPUs). See [Sizing](#sizing) |
 | `MAX_QUEUE` | `100` | Max requests in progress or waiting. Beyond this, requests get `503` |
 | `MAX_REQUEST_RETRIES` | `3` | Retries per URL after a failure (`0` = no retries) |
-| `TIMEOUT_SECS` | `60` | Page load timeout, and separately the processing timeout |
+| `TIMEOUT_SECS` | `45` | Page load timeout, and separately the processing timeout |
 | `MAX_SCROLL_HEIGHT_PIXELS` | `5000` | Scroll distance used to load lazy content (`0` = no scrolling) |
 | `CLOSE_COOKIE_MODALS` | `true` | Dismiss cookie consent pop-ups before extracting |
 | `USE_APIFY_PROXY` | `false` | Route traffic through Apify Proxy |
@@ -110,7 +110,8 @@ Measured in Docker without a proxy, on 10 small business sites (2026-10-02):
 - CPU is the bottleneck. Past about 1.5 pages per CPU, more concurrency only makes each page slower.
 - RAM is about 600 MB plus 45 MB per page in progress, so 1 GB per CPU is enough.
 - To scale, run more instances behind a load balancer. The server is stateless.
-- A proxy adds network wait, so re-measure with your proxy settings.
+- These numbers are without a proxy. A residential proxy adds seconds of network wait per page, and Chrome uses almost no CPU while waiting, so more pages fit per CPU: 10 on 4 CPUs / 4 GB ran fine in local tests (2026-10-06).
+- To check a setting under real load: `docker stats` near 100% per CPU means CPU is the limit, and so do `scroll` / `extract` steps in the `Scraped ...` log growing to several seconds. `nav` mostly reflects proxy speed.
 
 With Apify Proxy enabled, `.ua` URLs automatically use a Ukrainian proxy. All other URLs use a random proxy from the configured groups. Edit the allowlist in [src/internals/proxy.ts](src/internals/proxy.ts).
 

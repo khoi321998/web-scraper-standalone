@@ -20,7 +20,7 @@ import { AUTO_PROXY_COUNTRIES, createApifyProxyConfiguration } from './internals
  *   GET  /                                  -> health / status (no auth, for health checks)
  *
  * Env vars: API_KEY (required), PORT (8080), MAX_CONCURRENCY (4), MAX_QUEUE (100), MAX_REQUEST_RETRIES (3),
- * TIMEOUT_SECS (60), MAX_SCROLL_HEIGHT_PIXELS (5000, 0 = no scrolling), CLOSE_COOKIE_MODALS (true),
+ * TIMEOUT_SECS (45), MAX_SCROLL_HEIGHT_PIXELS (5000, 0 = no scrolling), CLOSE_COOKIE_MODALS (true),
  * USE_APIFY_PROXY (false) + APIFY_PROXY_PASSWORD, APIFY_PROXY_GROUPS (comma-separated).
  */
 
@@ -42,7 +42,8 @@ const PORT = intEnv('PORT', 8080);
 const MAX_CONCURRENCY = intEnv('MAX_CONCURRENCY', 4);
 const MAX_QUEUE = intEnv('MAX_QUEUE', 100);
 const MAX_REQUEST_RETRIES = intEnv('MAX_REQUEST_RETRIES', 3, 0);
-const TIMEOUT_SECS = intEnv('TIMEOUT_SECS', 60);
+// Over residential proxy, healthy pages loaded in up to ~38s in tests; past 45s it's usually a bad exit IP, so retry sooner.
+const TIMEOUT_SECS = intEnv('TIMEOUT_SECS', 45);
 const MAX_SCROLL_HEIGHT_PIXELS = intEnv('MAX_SCROLL_HEIGHT_PIXELS', 5000, 0);
 const CLOSE_COOKIE_MODALS = process.env.CLOSE_COOKIE_MODALS !== 'false';
 const USE_APIFY_PROXY = process.env.USE_APIFY_PROXY === 'true';
@@ -208,9 +209,10 @@ const crawler = new PuppeteerCrawler({
         if (job) job.proxy = describeProxy(ctx.proxyInfo);
         try {
             if (CLOSE_COOKIE_MODALS) {
-                await sleep(500);
+                // ~1s in total: a short pause for the banner to appear, then time for the dismiss click to apply.
+                await sleep(300);
                 await ctx.page.evaluate(getInjectableScript());
-                await sleep(2000);
+                await sleep(700);
                 markStep(job, 'cookies');
             }
             // Scroll to load lazy content before extracting.
