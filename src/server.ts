@@ -1,10 +1,11 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import type { ProxyInfo, PuppeteerCrawlingContext } from '@crawlee/puppeteer';
-import { Configuration, log, LoggerText, NonRetryableError, PuppeteerCrawler } from '@crawlee/puppeteer';
+import type { LogLevel, ProxyInfo, PuppeteerCrawlingContext } from '@crawlee/puppeteer';
+import { Configuration, Log, log, LoggerText, NonRetryableError, PuppeteerCrawler } from '@crawlee/puppeteer';
 import { getInjectableScript } from 'idcac-playwright';
 import type { HTTPResponse, Page } from 'puppeteer';
 
@@ -16,7 +17,7 @@ import { AUTO_PROXY_COUNTRIES, createApifyProxyConfiguration } from './internals
 /**
  * Scraper HTTP server: keeps one browser warm and scrapes URLs on demand.
  *
- *   POST /scrape  { "url": "https://..." }  -> scrape result + timing (requires header x-api-key)
+ *   POST /scrape  { "url": "https://...", "transactionId"?: "..." }  -> scrape result + timing (requires header x-api-key)
  *   GET  /                                  -> health / status (no auth, for health checks)
  *
  * Env vars: API_KEY (required), PORT (8080), MAX_CONCURRENCY (4), MAX_QUEUE (100), MAX_REQUEST_RETRIES (3),
@@ -26,6 +27,22 @@ import { AUTO_PROXY_COUNTRIES, createApifyProxyConfiguration } from './internals
 
 // Prefix every log line with a timestamp.
 log.setOptions({ logger: new LoggerText({ skipTime: false }) });
+
+/**
+ * Crawlee logs its own line for each retry and for the final failure, without the transactionId. Our
+ * "Attempt N failed" / "Scrape failed" lines carry the same error plus transactionId, proxy and timing, so drop these.
+ */
+const REPLACED_CRAWLER_LINES = [
+    'Reclaiming failed request back to the list or queue.',
+    'Request failed and reached maximum retries.',
+];
+
+class CrawlerLogger extends LoggerText {
+    override log(level: LogLevel, message: string, ...args: unknown[]) {
+        if (REPLACED_CRAWLER_LINES.some((line) => message.startsWith(line))) return;
+        super.log(level, message, ...args);
+    }
+}
 
 function intEnv(name: string, fallback: number, min = 1): number {
     const raw = process.env[name];
@@ -61,6 +78,9 @@ const REQUEST_CLEANUP_DELAY_MS = 30_000;
 const MEMORY_LOG_INTERVAL_MS = 10 * 60_000;
 
 interface Job {
+    url: string;
+    /** Optional id from the caller, logged with every line of this job so backend and server logs can be matched. */
+    transactionId?: string;
     resolve: (result: HarvestResult) => void;
     reject: (error: Error) => void;
     enqueuedAt: number;
@@ -84,6 +104,19 @@ function markStep(job: Job | undefined, name: string) {
     job?.marks.push([name, Date.now()]);
 }
 
+/**
+ * Error message on one line. Crawlee prefixes proxy errors with "Detected a session error, rotating session..."
+ * and puts the real cause (e.g. net::ERR_TUNNEL_CONNECTION_FAILED) on the next line, so keep all lines.
+ */
+function describeError(error: Error): string {
+    return error.message.replace(/\s*\n\s*/g, ' ').trim();
+}
+
+/** "url" or "url [transactionId: x]" - every log line of a job starts with this. */
+function describeJob(job: Job): string {
+    return job.transactionId ? `${job.url} [transactionId: ${job.transactionId}]` : job.url;
+}
+
 /** Proxy username carries group / session / country (e.g. "groups-RESIDENTIAL,session-x,country-UA"), never the password. */
 function describeProxy(proxyInfo?: ProxyInfo): string {
     if (!proxyInfo) return 'none';
@@ -98,13 +131,14 @@ function describeProxy(proxyInfo?: ProxyInfo): string {
  * Connect / TLS are -1 when Chrome reuses an open connection.
  */
 function describeNetworkTiming(response: HTTPResponse): string {
+    const status = `HTTP ${response.status()}`;
     const t = response.timing();
-    if (!t) return 'not available';
+    if (!t) return `${status}, timing not available`;
     const waitMs = t.receiveHeadersEnd - t.sendEnd;
-    if (t.connectStart < 0) return `connection reused, wait for response ${secs(waitMs)}`;
+    if (t.connectStart < 0) return `${status}, connection reused, wait for response ${secs(waitMs)}`;
     const tlsMs = t.sslStart < 0 ? 0 : t.sslEnd - t.sslStart;
     const tunnelMs = t.connectEnd - t.connectStart - tlsMs;
-    return `proxy tunnel ${secs(tunnelMs)}, TLS ${secs(tlsMs)}, wait for response ${secs(waitMs)}`;
+    return `${status}, proxy tunnel ${secs(tunnelMs)}, TLS ${secs(tlsMs)}, wait for response ${secs(waitMs)}`;
 }
 
 /** nav = page.goto until DOMContentLoaded (HTML + blocking scripts, all through the proxy). */
@@ -150,6 +184,7 @@ Configuration.getGlobalConfig().set('persistStorage', false);
 const proxyConfiguration = USE_APIFY_PROXY ? await createApifyProxyConfiguration(APIFY_PROXY_GROUPS) : undefined;
 
 const crawler = new PuppeteerCrawler({
+    log: new Log({ prefix: 'PuppeteerCrawler', logger: new CrawlerLogger({ skipTime: false }) }),
     keepAlive: true,
     maxConcurrency: MAX_CONCURRENCY,
     // Run at exactly MAX_CONCURRENCY. Crawlee's autoscaling cut it to 1-2 on Chrome's normal CPU spikes and
@@ -180,6 +215,14 @@ const crawler = new PuppeteerCrawler({
                 job.network = undefined;
                 job.attempts++;
             }
+            // Record network timing as soon as the main document's headers arrive, not after goto() returns, so an
+            // attempt that times out while loading still shows whether the proxy connected and the site answered.
+            // The last main-frame response wins, i.e. the final one after redirects.
+            page.on('response', (response) => {
+                if (job && response.request().isNavigationRequest() && response.frame() === page.mainFrame()) {
+                    job.network = describeNetworkTiming(response);
+                }
+            });
             await blockRequests({ urlPatterns: BLOCKED_URL_PATTERNS });
             await page.setExtraHTTPHeaders({ 'accept-language': ACCEPT_LANGUAGE });
             if (job) job.marks = [['start', Date.now()]];
@@ -192,10 +235,7 @@ const crawler = new PuppeteerCrawler({
         async ({ request, response }) => {
             const statusCode = response?.status();
             const job = jobs.get(request.userData.jobId as string);
-            if (job) {
-                job.statusCode = statusCode;
-                if (response) job.network = describeNetworkTiming(response);
-            }
+            if (job) job.statusCode = statusCode;
             markStep(job, 'nav');
             if (statusCode === undefined || statusCode < 400 || BLOCKED_STATUS_CODES.includes(statusCode)) return;
             // 5xx is often temporary (overloaded site, flaky proxy exit), so retry. Other 4xx (404, 410...) won't change.
@@ -220,12 +260,20 @@ const crawler = new PuppeteerCrawler({
                 await scrollPage(ctx.page, MAX_SCROLL_HEIGHT_PIXELS);
                 markStep(job, 'scroll');
             }
-            const result = await pageFunction({ page: ctx.page, request: ctx.request, log: ctx.log });
+            const result = await pageFunction({ page: ctx.page, request: ctx.request });
             markStep(job, 'extract');
             job?.resolve(result);
         } finally {
             activeCount--;
         }
+    },
+    // Called for each failed attempt that will be retried (the final failure goes to failedRequestHandler).
+    errorHandler({ request, proxyInfo }, error) {
+        const job = jobs.get(request.userData.jobId as string);
+        if (!job) return;
+        log.warning(
+            `Attempt ${job.attempts} failed for ${describeJob(job)}: ${describeError(error)} | proxy: ${describeProxy(proxyInfo)}, ${describeAttempt(job)}`,
+        );
     },
     failedRequestHandler({ request, proxyInfo }, error) {
         const job = jobs.get(request.userData.jobId as string);
@@ -283,6 +331,35 @@ function parseTargetUrl(body: unknown): string | null {
     }
 }
 
+const TRANSACTION_ID_PATTERN = /^[\w.:-]{1,100}$/;
+
+/** Optional `transactionId`: undefined when absent, null when invalid. Restricted characters keep log lines intact. */
+function parseTransactionId(body: unknown): string | undefined | null {
+    const id = (body as { transactionId?: unknown })?.transactionId;
+    if (id === undefined || id === null) return undefined;
+    return typeof id === 'string' && TRANSACTION_ID_PATTERN.test(id) ? id : null;
+}
+
+const DNS_CHECK_TIMEOUT_MS = 5000;
+
+/**
+ * Through a proxy, Chrome reports a domain that doesn't exist as a generic tunnel error, which Crawlee treats as a bad
+ * proxy and retries with up to 10 new sessions. Look the domain up first and fail at once when DNS says it doesn't
+ * exist. Any other outcome (timeout, temporary DNS failure) lets the scrape go ahead.
+ */
+async function assertDomainExists(url: string) {
+    // IPv6 literals come with brackets ("[::1]"), which lookup() doesn't accept.
+    const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    const result = await Promise.race([
+        lookup(hostname).then(
+            () => 'found',
+            (error: NodeJS.ErrnoException) => error.code,
+        ),
+        sleep(DNS_CHECK_TIMEOUT_MS, 'timeout', { ref: false }),
+    ]);
+    if (result === 'ENOTFOUND') throw new NonRetryableError(`Domain not found: ${hostname} has no DNS record.`);
+}
+
 async function handleScrape(req: IncomingMessage, res: ServerResponse) {
     let body: unknown;
     try {
@@ -298,22 +375,31 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         return;
     }
 
-    if (jobs.size >= MAX_QUEUE) {
-        sendFailed(res, 503, { url, error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
+    const transactionId = parseTransactionId(body);
+    if (transactionId === null) {
+        sendFailed(res, 400, { url, error: 'transactionId must be a string of 1-100 letters, digits or . _ : -' });
         return;
     }
 
     const jobId = randomUUID();
-    const job = { enqueuedAt: Date.now(), attempts: 0, marks: [] as Job['marks'] } as Job;
+    const job = { url, transactionId, enqueuedAt: Date.now(), attempts: 0, marks: [] as Job['marks'] } as Job;
+
+    if (jobs.size >= MAX_QUEUE) {
+        log.warning(`Rejected ${describeJob(job)}: server busy (in progress: ${jobs.size}, MAX_QUEUE=${MAX_QUEUE})`);
+        sendFailed(res, 503, { url, error: `Server busy: ${jobs.size} requests in progress (MAX_QUEUE=${MAX_QUEUE}).` });
+        return;
+    }
+
     const done = new Promise<HarvestResult>((resolve, reject) => {
         job.resolve = resolve;
         job.reject = reject;
     });
     jobs.set(jobId, job);
     let requestId: string | undefined;
-    log.info(`Received ${url} (in progress: ${jobs.size}, active: ${activeCount}/${MAX_CONCURRENCY})`);
+    log.info(`Received ${describeJob(job)} (in progress: ${jobs.size}, active: ${activeCount}/${MAX_CONCURRENCY})`);
 
     try {
+        await assertDomainExists(url);
         const { addedRequests } = await crawler.addRequests([{ url, uniqueKey: jobId, userData: { jobId } }]);
         requestId = addedRequests[0]?.requestId;
         // Wake the pool now. Its periodic check can be blocked while a task runs (betterSetInterval in
@@ -323,14 +409,14 @@ async function handleScrape(req: IncomingMessage, res: ServerResponse) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.info(
-            `Scraped ${url} (HTTP ${statusCode ?? '?'}) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}`,
+            `Scraped ${describeJob(job)} (HTTP ${statusCode ?? '?'}, ${result.count} items) in ${secs(t.totalMs)} (queue ${secs(t.queueMs)}, scrape ${secs(t.processMs)}), proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}`,
         );
         sendJson(res, 200, { status: 'success', ...result, statusCode, timing: t });
     } catch (error) {
         const t = timing(job);
         const statusCode = job.statusCode ?? null;
         log.warning(
-            `Scrape failed for ${url} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}: ${(error as Error).message}`,
+            `Scrape failed for ${describeJob(job)} (HTTP ${statusCode ?? 'no response'}) after ${secs(t.totalMs)}, proxy: ${job.proxy ?? 'none'}, ${describeAttempt(job)}: ${describeError(error as Error)}`,
         );
         sendFailed(res, 502, { url, error: (error as Error).message, statusCode, timing: t });
     } finally {

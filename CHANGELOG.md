@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Added** optional `transactionId` in the `POST /scrape` body (1-100 letters, digits or `. _ : -`, otherwise `400`). Every log line of the request shows it next to the url. It is not returned in the response.
+- **Added** an `Attempt N failed` log line for each failed attempt that is retried, with the error, proxy, network timing and finished steps. Network timing is recorded when the main document's headers arrive, so attempts that time out while loading also have it, and it now includes the HTTP status.
+- **Added** a `Rejected` log line when the queue is full (`503`), and the item count in the `Scraped` line.
+- **Changed** a domain with no DNS record now fails at once (`502`, "Domain not found"). Through a proxy it looked like a proxy error and was retried with up to 10 new sessions (~40s).
+- **Changed** Crawlee's own `Reclaiming failed request` and `Request failed and reached maximum retries` lines and the page function's `Extracted N items` line are no longer logged; the lines above replace them.
+
 - **Fixed** pages hanging 10-60s (often hitting the timeout) under parallel load: scrolling now uses `window.scrollBy` in small steps instead of Crawlee's `infiniteScroll`, whose mouse wheel input stalls in background tabs.
 - **Fixed** the server running far below `MAX_CONCURRENCY`: Crawlee's autoscaling is pinned to `MAX_CONCURRENCY`, since it dropped to 1-2 on normal Chrome CPU spikes and over-counted memory.
 - **Added** a sizing table to the README.

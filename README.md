@@ -14,8 +14,13 @@ Scrapes one URL. Requires the `x-api-key` header.
 curl -X POST http://localhost:8080/scrape \
   -H "Content-Type: application/json" \
   -H "x-api-key: <API_KEY>" \
-  -d '{"url":"https://www.hdwebsoft.com/"}'
+  -d '{"url":"https://www.hdwebsoft.com/","transactionId":"order-1234"}'
 ```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `url` | yes | http(s) URL to scrape |
+| `transactionId` | no | Caller's id for this request, 1-100 letters, digits or `. _ : -`. It is not returned in the response. Every log line of the request shows it next to the url (`https://... [transactionId: order-1234]`), so a backend request can be found in the server logs |
 
 Response `200`:
 
@@ -40,7 +45,7 @@ Response `200`:
 | Status | Meaning |
 | --- | --- |
 | `200` | Scraped successfully |
-| `400` | Body is not valid JSON, or `url` is missing or not http(s) |
+| `400` | Body is not valid JSON, `url` is missing or not http(s), or `transactionId` is invalid |
 | `401` | Missing or wrong `x-api-key` |
 | `502` | Scraping failed after all retries. Body: `{ "status": "failed", "url", "error", "statusCode", "timing" }` |
 | `503` | Queue is full (`MAX_QUEUE`) |
@@ -54,6 +59,7 @@ On `502`, `statusCode` is the target page's HTTP status in the last attempt, or 
 | `5xx` | Retried |
 | Other `4xx` (e.g. `404`, `410`) | Not retried, fails at once |
 | No response | Retried with a new proxy session |
+| Domain has no DNS record | Not scraped, fails at once. The server looks the domain up before scraping, because through a proxy a missing domain looks like a proxy error and would be retried. A DNS timeout or temporary failure doesn't block the scrape |
 
 ### `GET /`
 
@@ -104,6 +110,22 @@ docker run -d --name wss-server \
 - Generate the API key with `openssl rand -hex 32`.
 
 The server logs its effective configuration at startup. Secrets are shown only as `set` or `not set`.
+
+### Logs
+
+Each request writes these lines, all starting with the url and the `transactionId` when one was sent. Crawlee's own per-retry and final-failure lines are hidden because these replace them. Startup and periodic lines (`AutoscaledPool`, `Statistics`, `Memory`) aren't tied to a request and have no `transactionId`.
+
+| Line | When |
+| --- | --- |
+| `Received <url> [transactionId: x]` | Request accepted |
+| `Rejected ...: server busy` | Queue full, `503` returned |
+| `Attempt N failed for ...` | An attempt failed and will be retried. Shows the error, proxy, network timing and finished steps of that attempt |
+| `Scraped ... (HTTP 200, N items) in ...` | Success |
+| `Scrape failed for ...` | All attempts failed, `502` returned |
+
+Network timing comes from the main document's response: `HTTP 200, proxy tunnel 1.1s, TLS 0.7s, wait for response 0.8s`. `no response` means the proxy did not connect or the site never answered. A timing with `steps: none finished` means the HTML arrived but the page did not reach DOMContentLoaded in `TIMEOUT_SECS`.
+
+Find all lines of one request with `docker logs wss-server 2>&1 | grep order-1234`.
 
 ## Configuration
 

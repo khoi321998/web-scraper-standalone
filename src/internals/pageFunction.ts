@@ -13,7 +13,6 @@ import type { Page } from 'puppeteer';
 interface PageFunctionContext {
     page: Page;
     request: { url: string };
-    log: { info: (message: string) => void };
     [key: string]: unknown;
 }
 
@@ -34,7 +33,7 @@ export interface HarvestResult {
 }
 
 export async function pageFunction(context: PageFunctionContext): Promise<HarvestResult> {
-    const { page, request, log } = context;
+    const { page, request } = context;
 
     const data = await page.evaluate(() => {
         const content: HarvestItem[] = [];
@@ -129,6 +128,5 @@ export async function pageFunction(context: PageFunctionContext): Promise<Harves
         return { title, count: content.length, content };
     });
 
-    log.info(`Extracted ${data.count} items from ${request.url}`);
     return { url: request.url, title: data.title, count: data.count, content: data.content };
 }

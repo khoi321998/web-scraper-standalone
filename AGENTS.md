@@ -17,6 +17,7 @@ Self-hosted HTTP server that scrapes one URL per request with headless Chrome (C
 - Don't accept code from requests (no `eval` of page functions or hooks). Request bodies carry data only.
 - Keep `pageFunction.ts` type-checked TypeScript. Browser-side code goes inside `page.evaluate`.
 - Log with `log` from `@crawlee/puppeteer` (Apify's log, which censors tokens).
+- Every log line about a request starts with `describeJob(job)` (url + optional `transactionId`), so one request can be found with `grep <transactionId>`.
 
 ## Commands
 
